@@ -5,57 +5,72 @@ import type { Session } from '@supabase/supabase-js';
 import type { AuthUser, AuthContextType } from '@/types/auth';
 import { useAuthValidation } from '@/hooks/useAuthValidation';
 import { useAuthOperations } from '@/hooks/useAuthOperations';
-import { fetchUserProfile, clearSessionData } from '@/utils/authUtils';
+import { fetchUserProfile } from '@/utils/authUtils';
 
+// ✅ إنشاء الـ Context
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// ✅ Hook للاستخدام داخل المكونات
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (context === undefined) {
+  if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
 };
 
+// ✅ المزود الرئيسي (Provider)
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  
+
   const { validateSessionAndUser } = useAuthValidation();
   const { login, adminLogin, signup, logout } = useAuthOperations();
 
   useEffect(() => {
     const getSession = async () => {
-      const { data, error } = await supabase.auth.getSession();
-      setSession(data?.session || null);
-      setLoading(false);
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        setSession(data?.session || null);
+        setUser(data?.session?.user ? { 
+          id: data.session.user.id,
+          email: data.session.user.email!,
+          name: data.session.user.email?.split('@')[0] || 'User',
+          role: 'USER'
+        } : null);
+      } catch (err) {
+        console.error('❌ Error getting session:', err);
+      } finally {
+        setLoading(false);
+      }
     };
 
     getSession();
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setSession(null);
-          setLoading(false);
-          return;
-        }
-        
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-          if (session?.user) {
-            // CRITICAL: Check if user is banned before allowing access
+    const { data: subscription } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('🔄 Auth event:', event);
+
+      if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setSession(null);
+        setLoading(false);
+        return;
+      }
+
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        if (session?.user) {
+          try {
+            // 🔐 تحقق من إذا كان المستخدم محظور
             const { data: canAuth, error: authCheckError } = await supabase.rpc('can_user_authenticate', {
               _user_id: session.user.id
             });
 
-            if (authCheckError) {
-              console.error('❌ Auth check error:', authCheckError);
-            }
+            if (authCheckError) console.error('Auth check error:', authCheckError);
 
             if (!canAuth) {
-              console.warn('🚫 BLOCKED: Banned user detected, signing out:', session.user.email);
+              console.warn('🚫 Banned user detected:', session.user.email);
               await supabase.auth.signOut();
               setSession(null);
               setUser(null);
@@ -63,35 +78,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               toast.error('تم حظر حسابك. تم تسجيل الخروج تلقائياً');
               return;
             }
-            
+
+            // ✅ تحميل بيانات المستخدم
             setSession(session);
-            
-            try {
-              const userData = await fetchUserProfile(session.user.id, session.user.email!);
-              setUser(userData);
-            } catch (error) {
-              console.error('❌ Failed to load profile:', error);
-              // Fallback user data with default USER role
-              const basicUserData: AuthUser = {
-                id: session.user.id,
-                email: session.user.email!,
-                name: session.user.email?.split('@')[0] || 'User',
-                role: 'USER'
-              };
-              setUser(basicUserData);
-            }
+            const userData = await fetchUserProfile(session.user.id, session.user.email!);
+            setUser(userData);
+          } catch (error) {
+            console.error('❌ Failed to load profile:', error);
+            setUser({
+              id: session.user.id,
+              email: session.user.email!,
+              name: session.user.email?.split('@')[0] || 'User',
+              role: 'USER'
+            });
+          } finally {
             setLoading(false);
           }
         }
       }
-    );
+    });
 
     return () => {
-      listener.subscription.unsubscribe();
+      subscription?.subscription?.unsubscribe();
     };
   }, []);
 
-  const contextValue = {
+  // ✅ القيمة المصدّرة للـ Context
+  const contextValue: AuthContextType = {
     user,
     session,
     login,
@@ -100,32 +113,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     logout,
     loading,
     isAdmin: user?.role === 'ADMIN',
-    checkAuthStatus: validateSessionAndUser
-  };
-
-  return (
-    <AuthContext.Provider value={contextValue}>
-      {children}
-    </AuthContext.Provider>
-  );
-};
-  const contextValue = {
-    user,
-    session,
-    login,
-    adminLogin,
-    signup,
-    logout,
-    loading,
-    isAdmin: user?.role === 'ADMIN',
-    checkAuthStatus
+    checkAuthStatus: validateSessionAndUser,
   };
 
   console.log('🏪 Auth Context State:', {
     user: user?.email || 'No user',
     session: !!session,
     loading,
-    isAdmin: user?.role === 'ADMIN'
+    isAdmin: user?.role === 'ADMIN',
   });
 
   return (
